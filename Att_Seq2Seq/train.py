@@ -4,7 +4,7 @@
 #    Author: Chuwei Luo
 #    Email: luochuwei@gmail.com
 #    Date: 26/07/2016
-#    Usage: Code optimization of dl4mt, dynamic output vocabulary
+#    Usage: Training
 #
 ##################################################################
 
