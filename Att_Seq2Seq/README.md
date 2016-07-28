@@ -1,4 +1,4 @@
-# Attention_CopyNet
+# Standard Model
 
 Standard Seq2Seq Attention Model
 
