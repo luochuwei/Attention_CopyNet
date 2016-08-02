@@ -1,8 +1,18 @@
+#-*- coding:utf-8 -*-
+############################################
+#
+#    Author: Chuwei Luo
+#    Email: luochuwei@gmail.com
+#    Date: 01/08/2016
+#    Usage: for training
+#
+############################################
+
 import numpy
 import os
 import cPickle
 
-from nmt_new import train
+from AttCopy import train
 
 def main(job_id, params):
     print params

@@ -1,6 +1,12 @@
-'''
-Build a neural machine translation model with soft attention
-'''
+#-*- coding:utf-8 -*-
+#######################################################
+#
+#    Author: Chuwei Luo
+#    Email: luochuwei@gmail.com
+#    Date: 01/08/2016
+#    Usage: Seq2Seq Attention CopyNet(based on dl4mt)
+#
+#######################################################
 import theano
 import theano.tensor as tensor
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
