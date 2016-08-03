@@ -4,4 +4,6 @@ Attention_CopyNet for summarization and response generation
 
 Att_Seq2Seq(Finished)
 
-Att_CopyNet(80% finished, under developing...)
+Att_CopyNet(Finished)
+
+Att_POS_CopyNet(Finished)
