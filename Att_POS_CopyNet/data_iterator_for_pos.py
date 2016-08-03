@@ -1,3 +1,13 @@
+#-*- coding:utf-8 -*-
+#######################################################
+#
+#    Author: Chuwei Luo
+#    Email: luochuwei@gmail.com
+#    Date: 03/08/2016
+#    Usage: text iterator for pos
+#
+#######################################################
+
 import cPickle as pkl
 import gzip
 
