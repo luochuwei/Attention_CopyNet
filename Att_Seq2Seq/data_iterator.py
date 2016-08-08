@@ -1,3 +1,12 @@
+#-*- coding:utf-8 -*-
+##################################################################
+#
+#    Author: Chuwei Luo
+#    Email: luochuwei@gmail.com
+#    Date: 26/07/2016
+#    Usage: data iterator
+#
+##################################################################
 import cPickle as pkl
 import gzip
 
