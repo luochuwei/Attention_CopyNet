@@ -1,18 +1,18 @@
 #-*- coding:utf-8 -*-
-#######################################################
+############################################
 #
 #    Author: Chuwei Luo
 #    Email: luochuwei@gmail.com
-#    Date: 01/08/2016
-#    Usage: Seq2Seq Attention CopyNet(based on dl4mt)
+#    Date: 15/08/2016
+#    Usage: Attention CopyNet
 #
-#######################################################
+############################################
 import theano
 import theano.tensor as tensor
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
 import cPickle as pkl
-import ipdb
+# import ipdb
 import numpy
 import copy
 
@@ -527,9 +527,8 @@ def init_params(options):
 
     # embedding
     params['Wemb'] = norm_weight(options['n_words_src'], options['dim_word'])
-    params['Wemb_dec'] = norm_weight(options['n_words'], options['dim_word'])
+    # params['Wemb_pos'] = norm_weight(options['n_pos'], options['dim_pos'])
 
-    # encoder: bidirectional RNN
     params = get_layer(options['encoder'])[0](options, params,
                                               prefix='encoder',
                                               nin=options['dim_word'],
@@ -550,6 +549,18 @@ def init_params(options):
                                               dim=options['dim'],
                                               dimctx=ctxdim)
     # readout
+    # params = get_layer('ff')[0](options, params, prefix='ff_logit_lstm',
+    #                             nin=options['dim'], nout=options['dim_word'],
+    #                             ortho=False)
+    # params = get_layer('ff')[0](options, params, prefix='ff_logit_prev',
+    #                             nin=options['dim_word'],
+    #                             nout=options['dim_word'], ortho=False)
+    # params = get_layer('ff')[0](options, params, prefix='ff_logit_ctx',
+    #                             nin=ctxdim, nout=options['dim_word'],
+    #                             ortho=False)
+    # params = get_layer('ff')[0](options, params, prefix='ff_logit',
+    #                             nin=options['dim_word'],
+    #                             nout=options['n_words'])
     params = get_layer('ff')[0](options, params, prefix='ff_logit_lstm',
                                 nin=options['dim'], nout=options['dim_word'],
                                 ortho=False)
@@ -562,8 +573,9 @@ def init_params(options):
     params = get_layer('ff')[0](options, params, prefix='ff_logit',
                                 nin=options['dim_word'],
                                 nout=options['n_words'])
-    # params['att_lambda'] = norm_weight(nin=1, nout=options['n_words'])
-    params['att_lambda'] = 0.01 * numpy.random.randn(options['n_words']).astype('float32')
+
+    params['W_out_lambda'] = 0.01 * numpy.random.randn(options['dim'],1).astype('float32')
+
 
     return params
 
@@ -577,9 +589,15 @@ def build_model(tparams, options):
 
     # description string: #words x #samples
     x = tensor.matrix('x', dtype='int64')
+    x_map1 = tensor.vector('x', dtype='int64')
+    # x_map2 = tensor.vector('x', dtype='int64')
     x_mask = tensor.matrix('x_mask', dtype='float32')
     y = tensor.matrix('y', dtype='int64')
+    new_y = tensor.matrix('new_y', dtype='int64')
     y_mask = tensor.matrix('y_mask', dtype='float32')
+
+    word_map = tensor.vector('wm', dtype='int64')
+    # label_for_dim_expand = tensor.vector('lde', dtype='int64')
 
     # for the backward rnn, we just need to invert x and x_mask
     xr = x[::-1]
@@ -591,6 +609,7 @@ def build_model(tparams, options):
 
     # word embedding for forward rnn (source)
     emb = tparams['Wemb'][x.flatten()]
+
     emb = emb.reshape([n_timesteps, n_samples, options['dim_word']])
     proj = get_layer(options['encoder'])[1](tparams, emb, options,
                                             prefix='encoder',
@@ -619,7 +638,8 @@ def build_model(tparams, options):
     # to the right. This is done because of the bi-gram connections in the
     # readout and decoder rnn. The first target will be all zeros and we will
     # not condition on the last output.
-    emb = tparams['Wemb_dec'][y.flatten()]
+    # emb = tparams['Wemb_dec'][y.flatten()]
+    emb = tparams['Wemb'][y.flatten()]
     emb = emb.reshape([n_timesteps_trg, n_samples, options['dim_word']])
     emb_shifted = tensor.zeros_like(emb)
     emb_shifted = tensor.set_subtensor(emb_shifted[1:], emb[:-1])
@@ -649,38 +669,52 @@ def build_model(tparams, options):
                                     prefix='ff_logit_prev', activ='linear')
     logit_ctx = get_layer('ff')[1](tparams, ctxs, options,
                                    prefix='ff_logit_ctx', activ='linear')
+
     logit = tensor.tanh(logit_lstm+logit_prev+logit_ctx)
+
+
+    proj_h_shp = proj_h.shape
+
+    attw_lambda = tensor.nnet.sigmoid(tensor.dot(proj_h.reshape([proj_h_shp[0] * proj_h_shp[1], proj_h_shp[2]]), tparams['W_out_lambda']))
+
     if options['use_dropout']:
         logit = dropout_layer(logit, use_noise, trng)
-    logit = get_layer('ff')[1](tparams, logit, options,
-                               prefix='ff_logit', activ='linear')
+
+    logit = eval('linear')(tensor.dot(logit, tparams[_p('ff_logit', 'W')][:,word_map]) + tparams[_p('ff_logit', 'b')][word_map])
+
     #copy attention
     logit_shp = logit.shape
-    sflogit = logit.reshape([logit_shp[0]*logit_shp[1], logit_shp[2]])
-    logit_new = (1-tparams['att_lambda']) * sflogit
+    r1,_ = theano.scan(lambda :tensor.constant(0), n_steps = logit_shp[2])
+    logit_new = (1-attw_lambda[:,r1]) * logit.reshape([logit_shp[0]*logit_shp[1], logit_shp[2]])
+
     alpha_shape = opt_ret['dec_alphas'].shape
-    attw = opt_ret['dec_alphas'].reshape([alpha_shape[0]*alpha_shape[1],alpha_shape[2]])
+    attw = opt_ret['dec_alphas'].reshape([alpha_shape[0] * alpha_shape[1], alpha_shape[2]])
+    r2,_ = theano.scan(lambda :tensor.constant(0), n_steps = alpha_shape[2])
+    lambda_plus_attw1 = attw_lambda[:,r2] * attw
+    lambda_plus_attw = lambda_plus_attw1.reshape([alpha_shape[0], alpha_shape[1]*alpha_shape[2]])
+    logit_new2 = logit_new.reshape([logit_shp[0], logit_shp[1]*logit_shp[2]])
+    
+    # logit_new2 = tensor.set_subtensor(logit_new2[:,x_map1], logit_new2[:,x_map1] + tparams['att_lambda'][word_map][x_map2] * attw)
+    logit_new2 = tensor.set_subtensor(logit_new2[:,x_map1], logit_new2[:,x_map1] + lambda_plus_attw)
 
-    def _step_for_copy(label, lg, _x, atw):
-        lg = tensor.set_subtensor(lg[label, _x[label%_x.shape[0]]], lg[label, _x[label%_x.shape[0]]] + tparams['att_lambda'][_x[label%_x.shape[0]]]*atw[label])
-        return lg
-    # ls = T.vector('ls', dtype='int64')
-    result, _ = theano.scan(_step_for_copy, sequences=tensor.arange(logit_new.shape[0]), outputs_info=[logit_new], non_sequences = [x.T, attw])
+    # def _step_for_copy(label, lg, _x, atw):
+    #     lg = tensor.set_subtensor(lg[label, _x[label%_x.shape[0]]], lg[label, _x[label%_x.shape[0]]] + tparams['att_lambda'][word_map][_x[label%_x.shape[0]]]*atw[label])
+    #     return lg
+    # # ls = T.vector('ls', dtype='int64')
+    # result, _ = theano.scan(_step_for_copy, sequences=tensor.arange(logit_new.shape[0]), outputs_info=[logit_new], non_sequences = [new_x.T, attw])
 
-
-
-
-
-    probs = tensor.nnet.softmax(result[-1])
+    probs = tensor.nnet.softmax(logit_new2.reshape([logit_shp[0]*logit_shp[1], logit_shp[2]]))
 
     # cost
-    y_flat = y.flatten()
-    y_flat_idx = tensor.arange(y_flat.shape[0]) * options['n_words'] + y_flat
+    # y_flat = y.flatten()
+    y_flat = new_y.flatten()
+    y_flat_idx = tensor.arange(y_flat.shape[0]) * word_map.shape[0] + y_flat
     cost = -tensor.log(probs.flatten()[y_flat_idx])
     cost = cost.reshape([y.shape[0], y.shape[1]])
     cost = (cost * y_mask).sum(0)
 
-    return trng, use_noise, x, x_mask, y, y_mask, opt_ret, cost
+
+    return trng, use_noise, x, x_map1, x_mask, y, new_y, y_mask, opt_ret, cost, word_map
 
 
 # build a sampler
@@ -691,8 +725,13 @@ def build_sampler(tparams, options, trng, use_noise):
     n_samples = x.shape[1]
 
     # word embedding (source), forward and backward
+    # emb = tparams['Wemb'][x.flatten()]
+    # emb = emb.reshape([n_timesteps, n_samples, options['dim_word']])
+    # embr = tparams['Wemb'][xr.flatten()]
+    # embr = embr.reshape([n_timesteps, n_samples, options['dim_word']])
     emb = tparams['Wemb'][x.flatten()]
     emb = emb.reshape([n_timesteps, n_samples, options['dim_word']])
+
     embr = tparams['Wemb'][xr.flatten()]
     embr = embr.reshape([n_timesteps, n_samples, options['dim_word']])
 
@@ -718,12 +757,18 @@ def build_sampler(tparams, options, trng, use_noise):
 
     # x: 1 x 1
     y = tensor.vector('y_sampler', dtype='int64')
+    x_map1 = tensor.vector('x', dtype='int64')
+    # x_map2 = tensor.vector('x', dtype='int64')
+    word_map = tensor.vector('wm', dtype='int64')
     init_state = tensor.matrix('init_state', dtype='float32')
 
     # if it's the first word, emb should be all zero and it is indicated by -1
+    # emb = tensor.switch(y[:, None] < 0,
+    #                     tensor.alloc(0., 1, tparams['Wemb_dec'].shape[1]),
+    #                     tparams['Wemb_dec'][y])
     emb = tensor.switch(y[:, None] < 0,
-                        tensor.alloc(0., 1, tparams['Wemb_dec'].shape[1]),
-                        tparams['Wemb_dec'][y])
+                        tensor.alloc(0., 1, tparams['Wemb'].shape[1]),
+                        tparams['Wemb'][y])
 
     # apply one step of conditional gru with attention
     proj = get_layer(options['decoder'])[1](tparams, emb, options,
@@ -743,25 +788,43 @@ def build_sampler(tparams, options, trng, use_noise):
                                     prefix='ff_logit_prev', activ='linear')
     logit_ctx = get_layer('ff')[1](tparams, ctxs, options,
                                    prefix='ff_logit_ctx', activ='linear')
+
     logit = tensor.tanh(logit_lstm+logit_prev+logit_ctx)
+
+
     if options['use_dropout']:
         logit = dropout_layer(logit, use_noise, trng)
-    logit = get_layer('ff')[1](tparams, logit, options,
-                               prefix='ff_logit', activ='linear')
 
-    logit_new = (1-tparams['att_lambda']) * logit
+    # logit = get_layer('ff')[1](tparams, logit, options,
+    #                            prefix='ff_logit', activ='linear')
+    # logit = eval('linear')(tensor.dot(logit, tparams[_p('ff_logit', 'W')][:,word_map]) + tparams[_p('ff_logit', 'b')][word_map])
+
+    logit = eval('linear')(tensor.dot(logit, tparams[_p('ff_logit', 'W')][:,word_map]) + tparams[_p('ff_logit', 'b')][word_map])
+    
+    #do not copy 'eos'
+    # tparams['att_lambda'] = tensor.set_subtensor(tparams['att_lambda'][0], 0.0)
+
+    attw_lambda = tensor.nnet.sigmoid(tensor.dot(next_state, tparams['W_out_lambda']))
+
+    f_lambda = theano.function([x_map1, y, ctx, init_state, word_map], attw_lambda, on_unused_input='ignore')
+
+    # logit_new = (1-tparams['att_lambda'][word_map]) * logit
+
+    r1,_ = theano.scan(lambda :tensor.constant(0), n_steps=logit.shape[-1])
+
+    logit_new = (1-attw_lambda[:, r1]) * logit
 
     attw = proj[2]
 
-    def _step_for_copy(label, lg, _x, atw):
-        lg = tensor.set_subtensor(lg[label, _x[label%_x.shape[0]]], lg[label, _x[label%_x.shape[0]]] + tparams['att_lambda'][_x[label%_x.shape[0]]]*atw[label])
-        return lg
-    # ls = T.vector('ls', dtype='int64')
-    result, _ = theano.scan(_step_for_copy, sequences=tensor.arange(logit_new.shape[0]), outputs_info=[logit_new], non_sequences = [x.T, attw])
+    r2,_ = theano.scan(lambda :tensor.constant(0), n_steps=attw.shape[-1])
+
+    # logit_new = tensor.set_subtensor(logit_new[:,x_map1], logit_new[:,x_map1] + tparams['att_lambda'][word_map][x_map2] * attw)
+    logit_new = tensor.set_subtensor(logit_new[:,x_map1], logit_new[:,x_map1] + attw_lambda[:, r2] * attw)
 
 
     # compute the softmax probability
-    next_probs = tensor.nnet.softmax(result[-1])
+    next_probs = tensor.nnet.softmax(logit_new)
+    # next_probs = next_probs[:,word_map]
 
     # sample from softmax distribution to get the sample
     next_sample = trng.multinomial(pvals=next_probs).argmax(1)
@@ -769,26 +832,28 @@ def build_sampler(tparams, options, trng, use_noise):
     # compile a function to do the whole thing above, next word probability,
     # sampled word for the next target, next hidden state to be used
     print 'Building f_next..',
-    inps = [x, y, ctx, init_state]
+    inps = [x_map1, y, ctx, init_state, word_map]
     outs = [next_probs, next_sample, next_state]
     f_next = theano.function(inps, outs, name='f_next', profile=profile)
     print 'Done'
 
-    return f_init, f_next
+    return f_init, f_next, f_lambda
 
 
 # generate sample, either with stochastic sampling or beam search. Note that,
 # this function iteratively calls f_init and f_next functions.
-def gen_sample(tparams, f_init, f_next, x, options, trng=None, k=1, maxlen=30,
+def gen_sample(tparams, f_init, f_next, f_lambda, x, x_map1, word_map, options, trng=None, k=1, maxlen=30,
                stochastic=True, argmax=False):
 
     # k is the beam size we have
+
     if k > 1:
         assert not stochastic, \
             'Beam search does not support stochastic sampling'
 
     sample = []
     sample_score = []
+    sample_lambda = []
     if stochastic:
         sample_score = 0
 
@@ -796,7 +861,9 @@ def gen_sample(tparams, f_init, f_next, x, options, trng=None, k=1, maxlen=30,
     dead_k = 0
 
     hyp_samples = [[]] * live_k
+
     hyp_scores = numpy.zeros(live_k).astype('float32')
+    hyp_scoresp = numpy.zeros(live_k).astype('float32')
     hyp_states = []
 
     # get initial state of decoder rnn and encoder context
@@ -806,31 +873,51 @@ def gen_sample(tparams, f_init, f_next, x, options, trng=None, k=1, maxlen=30,
 
     for ii in xrange(maxlen):
         ctx = numpy.tile(ctx0, [live_k, 1])
-        inps = [x, next_w, ctx, next_state]
+        inps = [x_map1, next_w, ctx, next_state, word_map]
+        # ttt = fftest(*inps)
+        # ipdb.set_trace()
+        lam = f_lambda(*inps)
         ret = f_next(*inps)
         next_p, next_w, next_state = ret[0], ret[1], ret[2]
+        true_next_w = numpy.array([word_map[next_w[0]]])
+        sample_lambda.append(lam)
 
         if stochastic:
             if argmax:
                 nw = next_p[0].argmax()
+                nw1 = word_map[next_p[0].argmax()]
+
             else:
                 nw = next_w[0]
-            sample.append(nw)
+                nw1 = true_next_w[0]
+
+            sample.append(nw1)
+
             sample_score -= numpy.log(next_p[0, nw])
+
             if nw == 0:
                 break
         else:
             cand_scores = hyp_scores[:, None] - numpy.log(next_p)
+
             cand_flat = cand_scores.flatten()
+
             ranks_flat = cand_flat.argsort()[:(k-dead_k)]
 
+
             voc_size = next_p.shape[1]
+
             trans_indices = ranks_flat / voc_size
+
             word_indices = ranks_flat % voc_size
+
             costs = cand_flat[ranks_flat]
 
+
             new_hyp_samples = []
+
             new_hyp_scores = numpy.zeros(k-dead_k).astype('float32')
+
             new_hyp_states = []
 
             for idx, [ti, wi] in enumerate(zip(trans_indices, word_indices)):
@@ -846,7 +933,9 @@ def gen_sample(tparams, f_init, f_next, x, options, trng=None, k=1, maxlen=30,
 
             for idx in xrange(len(new_hyp_samples)):
                 if new_hyp_samples[idx][-1] == 0:
-                    sample.append(new_hyp_samples[idx])
+                    w_m = numpy.array(word_map)[new_hyp_samples[idx]]
+                    sample.append(w_m)
+                    # sample.append(new_hyp_samples[idx])
                     sample_score.append(new_hyp_scores[idx])
                     dead_k += 1
                 else:
@@ -862,21 +951,24 @@ def gen_sample(tparams, f_init, f_next, x, options, trng=None, k=1, maxlen=30,
             if dead_k >= k:
                 break
 
-            next_w = numpy.array([w[-1] for w in hyp_samples])
+            # next_w = numpy.array([w[-1] for w in hyp_samples])
+            next_w = numpy.array([word_map[w[-1]] for w in hyp_samples])
             next_state = numpy.array(hyp_states)
 
     if not stochastic:
         # dump every remaining one
         if live_k > 0:
             for idx in xrange(live_k):
-                sample.append(hyp_samples[idx])
+                w_m = numpy.array(word_map)[new_hyp_samples[idx]]
+                sample.append(w_m)
+                # sample.append(word_map[hyp_samples[idx]])
                 sample_score.append(hyp_scores[idx])
 
-    return sample, sample_score
+    return sample, sample_score, sample_lambda
 
 
 # calculate the log probablities on a given corpus using translation model
-def pred_probs(f_log_probs, prepare_data, options, iterator, verbose=True):
+def pred_probs(f_log_probs, prepare_data, options, iterator, word_map0, verbose=True):
     probs = []
 
     n_done = 0
@@ -888,12 +980,23 @@ def pred_probs(f_log_probs, prepare_data, options, iterator, verbose=True):
                                             n_words_src=options['n_words_src'],
                                             n_words=options['n_words'])
 
-        pprobs = f_log_probs(x, x_mask, y, y_mask)
+        word_map = list(set(list(x.reshape(x.shape[0]*x.shape[1]))+list(y.reshape(y.shape[0]*y.shape[1]))+word_map0))
+        new_x = numpy.array([word_map.index(ii) for ii in x.reshape(x.shape[0]*x.shape[1])]).reshape(x.shape[0], x.shape[1])
+
+        # x_map2 = new_x.T.flatten()
+        x_map1 = new_x.T
+        for iii in xrange(x_map1.shape[0]):
+            x_map1[iii] += len(word_map)*iii
+        x_map1 = x_map1.flatten()
+        new_y = numpy.array([word_map.index(ii) for ii in y.reshape(y.shape[0]*y.shape[1])]).reshape(y.shape[0], y.shape[1])
+
+        pprobs = f_log_probs(x, x_map1, x_mask, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
         for pp in pprobs:
             probs.append(pp)
 
         if numpy.isnan(numpy.mean(probs)):
-            ipdb.set_trace()
+            # ipdb.set_trace()
+            print 1
 
         if verbose:
             print >>sys.stderr, '%d samples computed' % (n_done)
@@ -1042,26 +1145,32 @@ def train(dim_word=100,  # word vector dimensionality
           valid_datasets=['../data/dev/newstest2011.en.tok',
                           '../data/dev/newstest2011.fr.tok'],
           dictionaries=[
-              '/data/lisatmp3/chokyun/europarl/europarl-v7.fr-en.en.tok.pkl',
-              '/data/lisatmp3/chokyun/europarl/europarl-v7.fr-en.fr.tok.pkl'],
+              'data/worddicts.pkl',
+              'data/dict2.txt'],
           use_dropout=False,
           reload_=False,
-          overwrite=False):
+          overwrite=False,
+          show_lambda = False):
 
     # Model options
     model_options = locals().copy()
 
     # load dictionaries and invert them
-    worddicts = [None] * len(dictionaries)
-    worddicts_r = [None] * len(dictionaries)
-    for ii, dd in enumerate(dictionaries):
-        with open(dd, 'rb') as f:
-            worddicts[ii] = pkl.load(f)
-        worddicts_r[ii] = dict()
-        for kk, vv in worddicts[ii].iteritems():
-            worddicts_r[ii][vv] = kk
 
-    worddicts_r = [worddicts_r[0],worddicts_r[0]]
+    with open(dictionaries[0], 'rb') as f:
+        worddicts = pkl.load(f)
+    worddicts_r = dict()
+    for kk, vv in worddicts.iteritems():
+        worddicts_r[vv] = kk
+
+    word_map0 = []
+    with open(dictionaries[-1]) as ff:
+        for line in ff:
+            line = line.strip()
+            if line in worddicts:
+                if line not in word_map0 and worddicts[line]<n_words:
+                    word_map0.append(worddicts[line])
+
 
     # reload options
     if reload_ and os.path.exists(saveto):
@@ -1072,14 +1181,17 @@ def train(dim_word=100,  # word vector dimensionality
     print 'Loading data'
     train = TextIterator(datasets[0], datasets[1],
                          dictionaries[0], dictionaries[0],
-                         n_words_source=n_words_src, n_words_target=n_words,
+                         n_words_source=n_words, n_words_target=n_words,
                          batch_size=batch_size,
                          maxlen=maxlen)
+
     valid = TextIterator(valid_datasets[0], valid_datasets[1],
                          dictionaries[0], dictionaries[0],
-                         n_words_source=n_words_src, n_words_target=n_words,
+                         n_words_source=n_words, n_words_target=n_words,
                          batch_size=valid_batch_size,
                          maxlen=maxlen)
+
+    # ipdb.set_trace()
 
     print 'Building model'
     params = init_params(model_options)
@@ -1091,14 +1203,16 @@ def train(dim_word=100,  # word vector dimensionality
     tparams = init_tparams(params)
 
     trng, use_noise, \
-        x, x_mask, y, y_mask, \
+        x, x_map1, x_mask, y, new_y, y_mask, \
         opt_ret, \
-        cost = \
+        cost, word_map = \
         build_model(tparams, model_options)
-    inps = [x, x_mask, y, y_mask]
+    inps = [x, x_map1, x_mask, y, new_y, y_mask, word_map]
+
+    # ftest = theano.function(inps, att_lambda, on_unused_input='ignore')
 
     print 'Building sampler'
-    f_init, f_next = build_sampler(tparams, model_options, trng, use_noise)
+    f_init, f_next, f_lambda = build_sampler(tparams, model_options, trng, use_noise)
 
     # before any regularizer
     print 'Building f_log_probs...',
@@ -1177,6 +1291,8 @@ def train(dim_word=100,  # word vector dimensionality
 
         for x, y in train:
             n_samples += len(x)
+            if len(x) == 0:
+                continue
             uidx += 1
             use_noise.set_value(1.)
 
@@ -1188,11 +1304,26 @@ def train(dim_word=100,  # word vector dimensionality
                 print 'Minibatch with zero sample under length ', maxlen
                 uidx -= 1
                 continue
+            word_map = list(set(list(x.reshape(x.shape[0]*x.shape[1]))+list(y.reshape(y.shape[0]*y.shape[1]))+word_map0))
+            new_x = numpy.array([word_map.index(ii) for ii in x.reshape(x.shape[0]*x.shape[1])]).reshape(x.shape[0], x.shape[1])
+            # x_map2 = new_x.T.flatten()
+            x_map1 = new_x.T
+            for iii in xrange(x_map1.shape[0]):
+                x_map1[iii] += len(word_map)*iii
+            x_map1 = x_map1.flatten()
+
+            new_y = numpy.array([word_map.index(ii) for ii in y.reshape(y.shape[0]*y.shape[1])]).reshape(y.shape[0], y.shape[1])
+            # word_map3 = list(set(word_map+word_map0))
+            
 
             ud_start = time.time()
 
+            # ft = ftest(x, x_map1, x_mask, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
+            # ipdb.set_trace()
+
             # compute cost, grads and copy grads to shared variables
-            cost = f_grad_shared(x, x_mask, y, y_mask)
+            # print 'fuck cost'
+            cost = f_grad_shared(x, x_map1, x_mask, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
 
             # do the update on parameters
             f_update(lrate)
@@ -1236,8 +1367,16 @@ def train(dim_word=100,  # word vector dimensionality
                 # FIXME: random selection?
                 for jj in xrange(numpy.minimum(5, x.shape[1])):
                     stochastic = True
-                    sample, score = gen_sample(tparams, f_init, f_next,
-                                               x[:, jj][:, None],
+                    input_x = x[:, jj][:, None]
+                    word_map = list(set(list(x[:, jj][:, None].reshape(x[:, jj][:, None].shape[0]*x[:, jj][:, None].shape[1]))+word_map0+list(y[:, jj][:, None].reshape(y[:, jj][:, None].shape[0]*y[:, jj][:, None].shape[1]))))
+
+                    new_x_input = numpy.array([word_map.index(ii) for ii in input_x.reshape(input_x.shape[0]*input_x.shape[1])]).reshape(input_x.shape[0], input_x.shape[1])
+                    assert new_x_input.T.shape[0] == 1
+                    sx_map= new_x_input.T.flatten()
+
+
+                    sample, score, lam = gen_sample(tparams, f_init, f_next, f_lambda,
+                                               input_x, sx_map, word_map,
                                                model_options, trng=trng, k=1,
                                                maxlen=30,
                                                stochastic=stochastic,
@@ -1246,8 +1385,8 @@ def train(dim_word=100,  # word vector dimensionality
                     for vv in x[:, jj]:
                         if vv == 0:
                             break
-                        if vv in worddicts_r[0]:
-                            print worddicts_r[0][vv],
+                        if vv in worddicts_r:
+                            print worddicts_r[vv],
                         else:
                             print 'UNK',
                     print
@@ -1255,8 +1394,8 @@ def train(dim_word=100,  # word vector dimensionality
                     for vv in y[:, jj]:
                         if vv == 0:
                             break
-                        if vv in worddicts_r[1]:
-                            print worddicts_r[1][vv],
+                        if vv in worddicts_r:
+                            print worddicts_r[vv],
                         else:
                             print 'UNK',
                     print
@@ -1266,11 +1405,15 @@ def train(dim_word=100,  # word vector dimensionality
                     else:
                         score = score / numpy.array([len(s) for s in sample])
                         ss = sample[score.argmin()]
+                    label = 0
                     for vv in ss:
                         if vv == 0:
                             break
-                        if vv in worddicts_r[1]:
-                            print worddicts_r[1][vv],
+                        if vv in worddicts_r:
+                            if show_lambda:
+                                print str(worddicts_r[vv])+ "#" + str("%.4f" %float(lam[label])),
+                            else:
+                                print worddicts_r[vv],
                         else:
                             print 'UNK',
                     print
@@ -1279,7 +1422,7 @@ def train(dim_word=100,  # word vector dimensionality
             if numpy.mod(uidx, validFreq) == 0:
                 use_noise.set_value(0.)
                 valid_errs = pred_probs(f_log_probs, prepare_data,
-                                        model_options, valid)
+                                        model_options, valid, word_map0)
                 valid_err = valid_errs.mean()
                 history_errs.append(valid_err)
 
@@ -1295,7 +1438,8 @@ def train(dim_word=100,  # word vector dimensionality
                         break
 
                 if numpy.isnan(valid_err):
-                    ipdb.set_trace()
+                    # ipdb.set_trace()
+                    print 1
 
                 print 'Valid ', valid_err
 
@@ -1304,7 +1448,7 @@ def train(dim_word=100,  # word vector dimensionality
                 print 'Finishing after %d iterations!' % uidx
                 estop = True
                 break
-
+        # ipdb.set_trace()
         print 'Seen %d samples' % n_samples
 
         if estop:
@@ -1315,7 +1459,7 @@ def train(dim_word=100,  # word vector dimensionality
 
     use_noise.set_value(0.)
     valid_err = pred_probs(f_log_probs, prepare_data,
-                           model_options, valid).mean()
+                           model_options, valid, word_map0).mean()
 
     print 'Valid ', valid_err
 
@@ -1324,6 +1468,7 @@ def train(dim_word=100,  # word vector dimensionality
                 history_errs=history_errs,
                 uidx=uidx,
                 **params)
+    
 
     return valid_err
 

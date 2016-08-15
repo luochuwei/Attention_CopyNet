@@ -3,7 +3,7 @@
 #
 #    Author: Chuwei Luo
 #    Email: luochuwei@gmail.com
-#    Date: 01/08/2016
+#    Date: 15/08/2016
 #    Usage: for training
 #
 ############################################
@@ -16,7 +16,7 @@ from AttCopy import train
 
 def main(job_id, params):
     print params
-    basedir = 'data'
+    basedir = 'data_2'
     validerr = train(saveto=params['model'][0],
                                         reload_=params['reload'][0],
                                         dim_word=params['dim_word'][0],
@@ -27,22 +27,23 @@ def main(job_id, params):
                                         clip_c=params['clip-c'][0],
                                         lrate=params['learning-rate'][0],
                                         optimizer=params['optimizer'][0],
-                                        maxlen=15,
-                                        batch_size=2,
-                                        valid_batch_size=1,
-                    datasets=['%s/pp.txt'%basedir,
-                    '%s/pp.txt'%basedir],
-                    valid_datasets=['%s/ppv.txt'%basedir,
-                    '%s/ppv.txt'%basedir],
+                                        maxlen=100,
+                                        batch_size=32,
+                                        valid_batch_size=32,
+                    datasets=['%s/p.txt'%basedir,
+                    '%s/p.txt'%basedir],
+                    valid_datasets=['%s/p.txt'%basedir,
+                    '%s/p.txt'%basedir,],
                     # dictionaries=['%s/p.txt.pkl'%basedir,
                     # '%s/r.txt.pkl'%basedir],
-                    dictionaries=['%s/pp.txt.pkl'%basedir],
-                                        validFreq=500000,
+                    dictionaries=['%s/word_dict.pkl'%basedir,'%s/dict2.txt'%basedir],
+                                        validFreq=100,
                                         dispFreq=1,
                                         saveFreq=100,
                                         sampleFreq=1,
                                         use_dropout=params['use-dropout'][0],
-                                        overwrite=False)
+                                        overwrite=False,
+                                        show_lambda=False)
     return validerr
 
 if __name__ == '__main__':
@@ -57,17 +58,17 @@ if __name__ == '__main__':
     OrderedDict([('eos', 0), ('UNK', 1), ('B', 2), ('C', 3), ('A', 4)])
 
     """
-    basedir = 'data'
+    basedir = 'data_2'
     main(0, {
-        'model': ['%s/model/m.model'%basedir],
-        'dim_word': [100],
-        'dim': [124],
-        'n-words': [12],
+        'model': ['%s/model/m.npz'%basedir],
+        'dim_word': [100],#word embedding dim
+        'dim': [100],     #hidden dim
+        'n-words': [6],   #vocabulary size
         'optimizer': ['rmsprop'],
         'decay-c': [0.],
         'clip-c': [1.],
         'use-dropout': [False],
-        'learning-rate': [0.0001],
+        'learning-rate': [0.1],
         'reload': [False]})
 
 
