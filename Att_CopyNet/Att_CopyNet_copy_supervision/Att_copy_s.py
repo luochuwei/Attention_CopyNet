@@ -4,7 +4,7 @@
 #    Author: Chuwei Luo
 #    Email: luochuwei@gmail.com
 #    Date: 18/08/2016
-#    Usage: copy net
+#    Usage: copy net supervision
 #
 ############################################
 import theano
@@ -601,6 +601,8 @@ def build_model(tparams, options):
     # label_for_dim_expand = tensor.vector('lde', dtype='int64')
     # lambda_a = tensor.matrix('lambda_a', dype='int64')
 
+    copy_supervision = tensor.matrix('cs', dtype='float32')
+
     # for the backward rnn, we just need to invert x and x_mask
     xr = x[::-1]
     xr_mask = x_mask[::-1]
@@ -679,6 +681,8 @@ def build_model(tparams, options):
 
     attw_lambda = tensor.nnet.sigmoid(tensor.dot(proj_h.reshape([proj_h_shp[0] * proj_h_shp[1], proj_h_shp[2]]), tparams['W_out_lambda']))
 
+    cost_lambda = tensor.nnet.binary_crossentropy(tensor.clip(attw_lambda, 1e-6, 1.0 - 1e-6), copy_supervision.reshape([proj_h_shp[0] * proj_h_shp[1],1])).mean()
+
     if options['use_dropout']:
         logit = dropout_layer(logit, use_noise, trng)
 
@@ -714,10 +718,12 @@ def build_model(tparams, options):
     cost = cost.reshape([y.shape[0], y.shape[1]])
     cost = (cost * y_mask).sum(0)
 
-    fucktest = [attw, probs]
+    cost += cost_lambda
+
+    fucktest = [attw_lambda, copy_supervision]
 
 
-    return trng, use_noise, x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, opt_ret, cost, word_map, fucktest
+    return trng, use_noise, copy_supervision, x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, opt_ret, cost, word_map, fucktest
 
 
 # build a sampler
@@ -905,6 +911,9 @@ def gen_sample(tparams, f_init, f_next, f_lambda, x, x_mask, x_map1, word_map, o
                 nw = next_w[0]
 
             sample.append(nw)
+            # ipdb.set_trace()
+            # if ii == 0 and nw == 0:
+            #     ipdb.set_trace()
 
             sample_score -= numpy.log(next_p[0, nw0])
 
@@ -999,6 +1008,12 @@ def pred_probs(f_log_probs, prepare_data, options, iterator, word_map0, verbose=
         x_mask_for_attw = numpy.array([1 if jj !=0 else 0 for jj in x.flatten()], dtype='float32')
         x_mask_for_attw = x_mask_for_attw.reshape(x.shape)
 
+        copy_supervision = []
+        for ij in xrange(x.shape[1]):
+            copy_supervision.append([1 if ji in x.T[ij] and ji != 0 else 0 for ji in y.T[ij]])
+
+        copy_supervision = numpy.array(copy_supervision, dtype='float32')
+
         # x_map2 = new_x.T.flatten()
         x_map1 = new_x.T
         for iii in xrange(x_map1.shape[0]):
@@ -1006,7 +1021,7 @@ def pred_probs(f_log_probs, prepare_data, options, iterator, word_map0, verbose=
         x_map1 = x_map1.flatten()
         new_y = numpy.array([word_map.index(ii) for ii in y.reshape(y.shape[0]*y.shape[1])]).reshape(y.shape[0], y.shape[1])
 
-        pprobs = f_log_probs(x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
+        pprobs = f_log_probs(copy_supervision.T, x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
         for pp in pprobs:
             probs.append(pp)
 
@@ -1219,11 +1234,11 @@ def train(dim_word=100,  # word vector dimensionality
     tparams = init_tparams(params)
 
     trng, use_noise, \
-        x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, \
+        copy_supervision, x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, \
         opt_ret, \
         cost, word_map, fucktest = \
         build_model(tparams, model_options)
-    inps = [x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, word_map]
+    inps = [copy_supervision, x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, word_map]
 
     # ftest = theano.function(inps, fucktest, on_unused_input='ignore')
 
@@ -1334,15 +1349,21 @@ def train(dim_word=100,  # word vector dimensionality
             x_mask_for_attw = numpy.array([1 if jij !=0 else 0 for jij in x.flatten()], dtype='float32')
             x_mask_for_attw = x_mask_for_attw.reshape(x.shape)
 
+            copy_supervision = []
+            for ij in xrange(x.shape[1]):
+                copy_supervision.append([1 if ji in x.T[ij] and ji != 0 else 0 for ji in y.T[ij]])
+
+            copy_supervision = numpy.array(copy_supervision, dtype='float32')
+
             ud_start = time.time()
 
-            # ft1,ft2 = ftest(x, x_map1, x_mask, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
+            # ft1,ft2 = ftest(copy_supervision.T, x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
             # print ft1, ft2
             # ipdb.set_trace()
 
             # compute cost, grads and copy grads to shared variables
             # print 'fuck cost'
-            cost = f_grad_shared(x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
+            cost = f_grad_shared(copy_supervision.T, x, x_map1, x_mask, x_mask_for_attw, y, new_y, y_mask, numpy.array(word_map, dtype='int64'))
 
             # do the update on parameters
             f_update(lrate)
@@ -1399,7 +1420,7 @@ def train(dim_word=100,  # word vector dimensionality
                     sample, score, lam = gen_sample(tparams, f_init, f_next, f_lambda,
                                                input_x, gen_x_mask, sx_map, word_map,
                                                model_options, trng=trng, k=1,
-                                               maxlen=30,
+                                               maxlen=maxlen,
                                                stochastic=stochastic,
                                                argmax=False)
                     print 'Source ', jj, ': ',
